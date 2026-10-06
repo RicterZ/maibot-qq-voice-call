@@ -7,7 +7,7 @@ const path = require("node:path");
 const { app, BrowserWindow, ipcMain } = require("electron");
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
-const ALLOWED_COMMANDS = new Set([1, 5, 55]);
+const { validInvocation } = require("./commands.cjs");
 
 function port(value, fallback, name) {
   if (value === undefined || value === "") return fallback;
@@ -63,6 +63,7 @@ let rendererState = {
   lastInvocationCommand: null,
   lastInvocationAt: null,
   error: null,
+  audioDevices: { microphone: null, speaker: null, selection: null },
 };
 
 function loadControlToken() {
@@ -127,11 +128,11 @@ function startControlServer() {
         const body = await readJsonBody(req);
         const command = Number(body?.command);
         const params = body?.params;
-        if (!ALLOWED_COMMANDS.has(command)) {
-          return sendJson(res, 400, { code: -1, message: "command is not allowed" });
+        if (!validInvocation(command, params)) {
+          return sendJson(res, 400, { code: -1, message: "invalid command or params" });
         }
-        if (!Array.isArray(params) || params.length > 16) {
-          return sendJson(res, 400, { code: -1, message: "invalid params" });
+        if ([64, 65, 102].includes(command)) {
+          rendererState.audioDevices[{ 64: "microphone", 65: "speaker", 102: "selection" }[command]] = null;
         }
         const invocationId = nextInvocationId++;
         const result = await avWindow?.webContents.executeJavaScript(
@@ -182,6 +183,13 @@ async function forwardPluginMessage(message) {
     !Object.hasOwn(message, "value")
   ) {
     return;
+  }
+  if ([64, 65, 102].includes(message.cmd) && Array.isArray(message.value)) {
+    const key = { 64: "microphone", 65: "speaker", 102: "selection" }[message.cmd];
+    rendererState.audioDevices[key] = message.cmd === 102
+      ? { result: message.value[0] }
+      : { result: message.value[0], names: Array.isArray(message.value[2])
+          ? message.value[2].filter((name) => typeof name === "string").slice(0, 128) : [] };
   }
   try {
     const response = await fetch(
