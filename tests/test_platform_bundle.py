@@ -34,3 +34,25 @@ def test_linux_bundle_keeps_existing_launchers_without_windows(tmp_path):
         assert "scripts/run-av-host.sh" in bundle.namelist()
         assert "scripts/audio-control.sh" in bundle.namelist()
         assert not any(n.startswith("windows/") for n in bundle.namelist())
+
+
+def test_native_runtime_excludes_miniapps_but_preserves_avsdk(tmp_path):
+    native_spec = importlib.util.spec_from_file_location(
+        "prepare_runtime", ROOT / "bridge/windows/prepare_runtime.py"
+    )
+    native = importlib.util.module_from_spec(native_spec)
+    native_spec.loader.exec_module(native)
+    version = json.loads(native.COMPONENTS.read_text())["qq"]["version"]
+    source = tmp_path / "Files"
+    app = source / "versions" / version / "resources/app"
+    for name in ("wmpfsdk/runtime/flue.dll", "avsdk/AVSDKPlugin.dll", "package.json"):
+        path = app / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"native")
+    (source / "QQ.exe").write_bytes(b"host")
+    destination = tmp_path / "output"
+    native.copy_qq_runtime(source, destination)
+    relative = app.relative_to(source)
+    assert not (destination / relative / "wmpfsdk").exists()
+    assert (destination / relative / "avsdk/AVSDKPlugin.dll").read_bytes() == b"native"
+    assert (destination / "QQ.exe").read_bytes() == b"host"

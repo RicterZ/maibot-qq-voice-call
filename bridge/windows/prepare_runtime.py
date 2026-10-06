@@ -31,6 +31,17 @@ def download(component, destination):
     return destination
 
 
+def copy_qq_runtime(source: Path, destination: Path):
+    """Exclude mini-apps only at the pinned QQ app boundary, before copying."""
+    version = json.loads(COMPONENTS.read_text(encoding="utf-8"))["qq"]["version"]
+    app = source / "versions" / version / "resources/app"
+
+    def excluded(directory, names):
+        return {"wmpfsdk"} if Path(directory) == app and "wmpfsdk" in names else set()
+
+    shutil.copytree(source, destination, ignore=excluded)
+
+
 def prepare(output: Path, cache: Path, sevenzip="7z"):
     components = json.loads(COMPONENTS.read_text(encoding="utf-8"))
     installer = download(components["qq"], cache / ("QQ-" + components["qq"]["version"] + ".exe"))
@@ -42,13 +53,13 @@ def prepare(output: Path, cache: Path, sevenzip="7z"):
         check=True,
         stdout=subprocess.DEVNULL,
     )
-    # Start with the full verified runtime closure; do not assume the small
-    # NapCat Node QQNT.dll can replace the Electron host's QQNT.dll.
+    # Preserve the native host closure, but exclude the unrelated mini-app runtime.
+    # The Electron QQNT.dll cannot be replaced by the NapCat Node QQNT.dll.
     qq = output / "qq/Files"
     if qq.exists():
         shutil.rmtree(qq)
     qq.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(extracted / "Files", qq)
+    copy_qq_runtime(extracted / "Files", qq)
     for name, expected in components["loader"]["files"].items():
         source = download(
             {"url": components["loader"]["base_url"] + name, "sha256": expected}, cache / name
