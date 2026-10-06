@@ -20,6 +20,7 @@ function port(value, fallback, name) {
 
 function loadSettings(env = process.env) {
   const bridgeDir = path.resolve(env.MAIBOT_QQ_CALL_BRIDGE_DIR || path.join(__dirname, ".."));
+  const runtimeDir = path.resolve(env.MAIBOT_QQ_CALL_RUNTIME_DIR || path.join(bridgeDir, "runtime"));
   const qqDir = path.resolve(env.MAIBOT_QQ_CALL_QQ_DIR || path.join(bridgeDir, "QQ"));
   const host = env.MAIBOT_QQ_CALL_AV_HOST_HOST || "127.0.0.1";
   const bridgeHost = env.MAIBOT_QQ_CALL_BRIDGE_HOST || "127.0.0.1";
@@ -28,6 +29,7 @@ function loadSettings(env = process.env) {
   }
   return {
     bridgeDir,
+    runtimeDir,
     qqDir,
     host,
     listenPort: port(env.MAIBOT_QQ_CALL_AV_HOST_PORT, 6111, "AV host port"),
@@ -35,11 +37,11 @@ function loadSettings(env = process.env) {
     bridgePort: port(env.MAIBOT_QQ_CALL_BRIDGE_PORT, 6110, "bridge port"),
     token: (env.MAIBOT_QQ_CALL_BRIDGE_TOKEN || "").trim(),
     tokenFile: path.resolve(
-      env.MAIBOT_QQ_CALL_BRIDGE_TOKEN_FILE || path.join(bridgeDir, "runtime", "control.token"),
+      env.MAIBOT_QQ_CALL_BRIDGE_TOKEN_FILE || path.join(runtimeDir, "control.token"),
     ),
     avsdkPath: path.resolve(
       env.MAIBOT_QQ_CALL_AVSDK_PATH ||
-        path.join(qqDir, "resources", "app", "avsdk", "libAVSDKPlugin.so"),
+        path.join(qqDir, "resources", "app", "avsdk", process.platform === "win32" ? "AVSDKPlugin.dll" : "libAVSDKPlugin.so"),
     ),
   };
 }
@@ -223,7 +225,9 @@ app.commandLine.appendSwitch(
 );
 app.commandLine.appendSwitch("disable-gpu");
 app.commandLine.appendSwitch("no-sandbox");
-app.setPath("userData", path.join(settings.bridgeDir, "runtime", "av-host-profile"));
+const profileDir = path.join(settings.runtimeDir, "av-host-profile");
+fs.mkdirSync(profileDir, { recursive: true });
+app.setPath("userData", profileDir);
 
 app.whenReady()
   .then(async () => {

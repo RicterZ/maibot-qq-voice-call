@@ -111,3 +111,39 @@ Bridge。QQ 或 NapCat 升级后，重新运行安装器和诊断，并用测试
 
 本仓库不包含 QQ、NapCat、AVSDK 二进制、登录态、QQ 号或任何 API Key。
 用户需自行遵守 QQ、NapCat、云模型供应商及当地法律的适用条款。
+
+
+## Windows host adaptation
+
+Windows uses QQ's matching Electron host and the pinned official NapCat
+shell-loader. It does not invoke Bash, PulseAudio, Xvfb, or Linux installers.
+The host/plugin/callback path has been verified on Windows 11. Account login,
+call acceptance and bidirectional Windows audio are still under validation;
+this bundle must not be presented as a completed Windows voice-call product.
+
+Build platform-specific code bundles explicitly:
+
+```bash
+python bridge/build_bundle.py --platform windows --output dist/bridge-windows.zip
+python bridge/build_bundle.py --platform linux --output dist/bridge-linux.zip
+```
+
+The Windows bundle excludes Linux scripts, probes and build tools. Stage the
+native host separately on Windows with 7-Zip available:
+
+```powershell
+python bridge/windows/prepare_runtime.py --output dist/native --cache build/downloads
+Expand-Archive dist/bridge-windows.zip dist/bridge -Force
+& dist/bridge/windows/start-av-host.ps1 -NativeRoot dist/native -DataRoot data/qq-call
+```
+
+Run the host in the user's interactive desktop session. `DataRoot` holds the
+control token, redirected bootstrap/manifest and isolated Electron profile;
+bridge code and native components may remain read-only. The launcher redirects
+QQ file reads through its hook and does not modify the user's installed QQ.
+QQ's full Electron `QQNT.dll` is not interchangeable with NapCat Node's small
+shim of the same filename.
+
+`bridge/windows/probe/` contains the bounded, no-login probes. The manual
+Windows QQ call research workflow runs these without placing calls or recording
+audio. The existing Linux deployment remains unchanged.

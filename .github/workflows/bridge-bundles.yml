@@ -1,0 +1,23 @@
+name: Platform bridge bundles
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+permissions:
+  contents: read
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        platform: [windows, linux]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python bridge/build_bundle.py --platform ${{ matrix.platform }} --output dist/qq-call-${{ matrix.platform }}.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qq-call-${{ matrix.platform }}
+          path: dist/qq-call-${{ matrix.platform }}.zip
