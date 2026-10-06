@@ -151,6 +151,34 @@ test("NapCat lifecycle exposes only authenticated call state", async () => {
     assert.equal(authorized.status, 200);
     const payload = await authorized.json();
     assert.equal(payload.data.phase, "idle");
+    const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
+    const output = async (command, value) => {
+      const response = await fetch(`${baseUrl}/v1/avsdk/output`, {
+        method: "POST", headers, body: JSON.stringify({ command, value }),
+      });
+      assert.equal(response.status, 200);
+    };
+    const status = async () => (await (await fetch(`${baseUrl}/v1/status`, { headers })).json()).data;
+    await output(1, [0]);
+    assert.equal((await status()).avHost.loginSucceeded, true);
+    await output(20050, ["ordinary diagnostic"]);
+    assert.equal((await status()).avHost.loginSucceeded, true);
+    await output(1, [-1]);
+    assert.equal((await status()).avHost.loginSucceeded, false);
+    await output(1, [0]);
+    await output(120043, []);
+    assert.equal((await status()).avHost.loginSucceeded, false);
+    for (const body of [ { ownerUin: "123", ready: "yes" }, { ownerUin: "", ready: true } ]) {
+      const response = await fetch(`${baseUrl}/v1/momoi/ready`, {
+        method: "POST", headers, body: JSON.stringify(body),
+      });
+      assert.equal(response.status, 400);
+    }
+    const ready = await fetch(`${baseUrl}/v1/momoi/ready`, {
+      method: "POST", headers, body: JSON.stringify({ ownerUin: "123", ready: false }),
+    });
+    assert.equal(ready.status, 200);
+
   } finally {
     await plugin_cleanup();
     for (const [key, value] of Object.entries(previous)) {

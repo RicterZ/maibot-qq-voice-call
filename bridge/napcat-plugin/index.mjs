@@ -23,6 +23,7 @@ let listenerId = null;
 let activeSDKInvite = null;
 let loginTimer = null;
 let acceptTimer = null;
+let momoiReady = { ownerUin: "", until: 0 };
 
 const state = {
   startedAt: null,
@@ -40,6 +41,7 @@ const state = {
 function idleAVHost() {
   return {
     loginPosted: false,
+    loginSucceeded: false,
     kernelActionCount: 0,
     outputCount: 0,
     networkOutputCount: 0,
@@ -110,6 +112,7 @@ export function parseBridgeSettings(env = process.env, pluginDir = PLUGIN_DIR) {
       typeof env.MAIBOT_QQ_CALL_BRIDGE_TOKEN === "string"
         ? env.MAIBOT_QQ_CALL_BRIDGE_TOKEN.trim()
         : "",
+    requireReadiness: process.platform === "win32" || fileConfig.requireReadiness === true,
     tokenFile:
       env.MAIBOT_QQ_CALL_BRIDGE_TOKEN_FILE || fileConfig.tokenFile || "",
   };
@@ -258,6 +261,7 @@ async function resolveCallerIdentity(uid, inviteAt) {
     identityResolvedAt: new Date().toISOString(),
     identityError: uin ? null : errors.join("; ") || "caller identity lookup returned empty",
   };
+  if (uin && activeSDKInvite && state.call.phase === "ringing") scheduleAccept(0);
 }
 
 export function buildAcceptParams(invite) {
@@ -324,6 +328,9 @@ function invokeAVHost(command, params, retries = 2) {
 
 async function acceptActiveInvite() {
   if (!Array.isArray(activeSDKInvite) || state.call.phase === "ended") return;
+  if (settings.requireReadiness && (Date.now() >= momoiReady.until ||
+      !state.call.callerUin || state.call.callerUin !== momoiReady.ownerUin ||
+      !state.avHost.loginSucceeded)) return;
   const inviteAt = state.call.inviteAt;
   if (!inviteAt || state.avHost.autoAcceptInviteAt === inviteAt) return;
   state.avHost.autoAcceptInviteAt = inviteAt;
@@ -433,13 +440,12 @@ async function handleAVSDKOutput(body) {
   if (!Number.isInteger(command)) throw new Error("invalid AVSDK output command");
   state.avHost.outputCount += 1;
   state.avHost.lastOutputCommand = command;
-  if (
-    (command === 20050 || command === 120043) &&
-    state.avHost.loginPosted &&
-    pluginContext
-  ) {
+  if (command === 1) state.avHost.loginSucceeded = Array.isArray(value) && value[0] === 0;
+  if (command === 120043) {
+    const shouldRelogin = state.avHost.loginPosted && pluginContext;
     state.avHost.loginPosted = false;
-    scheduleAVHostLogin(pluginContext, 100);
+    state.avHost.loginSucceeded = false;
+    if (shouldRelogin) scheduleAVHostLogin(pluginContext, 100);
   }
   if (command === 20001) {
     if (!Array.isArray(value) || typeof value[0] !== "number" || typeof value[1] !== "string") {
@@ -494,6 +500,20 @@ async function startControlServer() {
     }
     if (!hasValidControlToken(req, controlToken)) {
       return sendJson(res, 401, { code: -1, message: "Unauthorized" });
+    }
+    if (req.method === "POST" && url.pathname === "/v1/momoi/ready") {
+      try {
+        const body = await readJsonBody(req);
+        if (typeof body.ownerUin !== "string" || !/^[0-9]+$/.test(body.ownerUin) ||
+            typeof body.ready !== "boolean") {
+          return sendJson(res, 400, { code: -1, message: "invalid readiness" });
+        }
+        momoiReady = { ownerUin: body.ownerUin, until: body.ready ? Date.now() + 4000 : 0 };
+        if (body.ready && activeSDKInvite && state.call.phase === "ringing") scheduleAccept(0);
+        return sendJson(res, 200, { code: 0 });
+      } catch {
+        return sendJson(res, 400, { code: -1, message: "invalid readiness" });
+      }
     }
     if (req.method === "GET" && url.pathname === "/v1/status") {
       return sendJson(res, 200, { code: 0, data: publicStatus() });
@@ -584,6 +604,7 @@ export const plugin_init = async (ctx) => {
 
 export const plugin_cleanup = async () => {
   pluginContext = null;
+  momoiReady = { ownerUin: "", until: 0 };
   if (loginTimer) clearTimeout(loginTimer);
   if (acceptTimer) clearTimeout(acceptTimer);
   loginTimer = null;
