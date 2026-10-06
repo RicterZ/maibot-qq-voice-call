@@ -515,6 +515,19 @@ async function startControlServer() {
         return sendJson(res, 400, { code: -1, message: "invalid readiness" });
       }
     }
+    if (req.method === "POST" && url.pathname === "/v1/avsdk/relogin") {
+      if (!pluginContext || !state.listenerRegistered) {
+        return sendJson(res, 503, { code: -1, message: "QQ listener is not ready" });
+      }
+      momoiReady = { ownerUin: "", until: 0 };
+      if (acceptTimer) clearTimeout(acceptTimer);
+      acceptTimer = null;
+      activeSDKInvite = null;
+      Object.assign(state.avHost, idleAVHost());
+      Object.assign(state.call, idleCall());
+      scheduleAVHostLogin(pluginContext, 100);
+      return sendJson(res, 200, { code: 0 });
+    }
     if (req.method === "GET" && url.pathname === "/v1/status") {
       return sendJson(res, 200, { code: 0, data: publicStatus() });
     }

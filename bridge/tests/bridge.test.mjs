@@ -174,6 +174,13 @@ test("NapCat lifecycle exposes only authenticated call state", async () => {
       });
       assert.equal(response.status, 400);
     }
+    const unauthorizedRelogin = await fetch(`${baseUrl}/v1/avsdk/relogin`, { method: "POST" });
+    assert.equal(unauthorizedRelogin.status, 401);
+    const relogin = await fetch(`${baseUrl}/v1/avsdk/relogin`, { method: "POST", headers });
+    assert.equal(relogin.status, 200);
+    const afterRelogin = await (await fetch(`${baseUrl}/v1/status`, { headers })).json();
+    assert.equal(afterRelogin.data.avHost.loginSucceeded, false);
+    assert.equal(afterRelogin.data.call.phase, "idle");
     const ready = await fetch(`${baseUrl}/v1/momoi/ready`, {
       method: "POST", headers, body: JSON.stringify({ ownerUin: "123", ready: false }),
     });
