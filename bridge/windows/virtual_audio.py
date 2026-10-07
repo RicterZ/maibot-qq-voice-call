@@ -117,13 +117,15 @@ def select_transport(device_ids, records=None):
     for role, flow, automatic in (("input_device", 1, "steamstreamingmicrophone"),
                                   ("output_device", 0, "steamstreamingspeakers")):
         requested = device_ids.get(role, "")
-        matches = [item for item in records if item["flow"] == flow and (
-            item["id"].casefold() == requested.casefold() if requested else
-            any(automatic in value.replace(" ", "") for value in item["association"]))]
-        if len(matches) != 1:
-            raise RuntimeError("所选音频设备不可用，请刷新设备列表并重新选择。" if requested else
-                "未找到默认虚拟音频线路，请在音频设置中选择已安装的虚拟麦克风和输出设备。")
-        selected[role] = matches[0]
+        matches = [item for item in records if item["flow"] == flow and
+                   (not requested or item["id"].casefold() == requested.casefold())]
+        if not matches or (requested and len(matches) != 1):
+            raise RuntimeError("所选音频设备不可用，请刷新设备列表并重新选择。")
+        def priority(item):
+            if cable_family(item) == "cable": return 0
+            if any(automatic in value.replace(" ", "") for value in item["association"]): return 1
+            return 2
+        selected[role] = sorted(matches, key=lambda item: (priority(item), item["name"].casefold(), item["id"]))[0]
     source = selected["input_device"]
     warnings = []
     paired = [item for item in records if item["flow"] == 0 and

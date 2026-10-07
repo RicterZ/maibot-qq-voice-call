@@ -176,3 +176,21 @@ def test_cable_input_output_pair_uses_cable_identity_not_pin_association():
     plan = virtual_audio.select_transport({"input_device": "a-out", "output_device": "cable-in"}, devices)
     assert plan["injection_device"]["id"] == "a-in"
     assert not plan["half_duplex"]
+
+
+def test_automatic_prefers_default_cable_then_steam_then_physical():
+    cable = [dict(id='cable-mic', name='CABLE Output (VB-Audio Virtual Cable)', flow=1,
+                  association=['capture-pin'], virtual=True, state=1),
+             dict(id='cable-render', name='CABLE Input (VB-Audio Virtual Cable)', flow=0,
+                  association=['render-pin'], virtual=True, state=1)]
+    plan = virtual_audio.select_transport({}, records() + cable)
+    assert plan['input_device']['id'] == 'cable-mic'
+    assert plan['output_device']['id'] == plan['injection_device']['id'] == 'cable-render'
+    assert plan['half_duplex']
+    plan = virtual_audio.select_transport({}, records())
+    assert plan['input_device']['id'] == 'steam-mic'
+    physical = [item for item in records() if not item['virtual']]
+    plan = virtual_audio.select_transport({}, physical)
+    assert plan['input_device']['id'] == 'physical'
+    assert plan['output_device']['id'] == 'edifier'
+    assert plan['warnings']
