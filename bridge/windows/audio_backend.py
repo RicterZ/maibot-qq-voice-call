@@ -5,7 +5,7 @@ import asyncio
 import sys
 from pathlib import Path
 
-from virtual_audio import (VirtualAudioSession, virtual_device_catalog,
+from virtual_audio import (VirtualAudioSession, audio_device_catalog, PAIRS,
                            active_endpoint_ids, endpoint_selector)
 
 
@@ -26,13 +26,15 @@ class WindowsAudioBackend:
         return self.session.ready and self.selected
 
     async def prepare(self, http, host_url, token):
-        catalog = virtual_device_catalog()
+        catalog = audio_device_catalog()
         for role, group in (("input_device", "inputs"), ("output_device", "outputs")):
             requested = self.device_ids.get(role, "")
             choices = catalog[group]
-            matches = [item for item in choices if not requested or item["id"] == requested]
+            automatic = PAIRS[0] if role == "input_device" else PAIRS[1]
+            matches = [item for item in choices if
+                       (item["id"] == requested if requested else automatic in item["name"])]
             if len(matches) != 1:
-                raise RuntimeError(f"Selected virtual {role} is unavailable; no default-device fallback")
+                raise RuntimeError(f"Selected {role} is unavailable; no default-device fallback")
             self.device_selection[role] = matches[0]
         import sounddevice as sd
         from audio_stream import endpoint
@@ -56,7 +58,7 @@ class WindowsAudioBackend:
         selectors = [endpoint_selector(self.device_selection[role]["id"],
                                        active_endpoint_ids(flow))
                      for role, flow in (("input_device", 1), ("output_device", 0))]
-        print(__import__("json").dumps({"event": "qq_call_virtual_devices_selected",
+        print(__import__("json").dumps({"event": "qq_call_devices_selected",
               "microphone_selector": selectors[0], "speaker_selector": selectors[1],
               "devices": self.device_selection}),
               file=sys.stderr, flush=True)

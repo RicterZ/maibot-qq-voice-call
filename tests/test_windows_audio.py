@@ -76,9 +76,9 @@ def test_prepare_uses_hardware_id_without_initializing_legacy_audio(monkeypatch,
     monkeypatch.setitem(sys.modules, "sounddevice", SimpleNamespace(
         InputStream=Stream, OutputStream=Stream, WasapiSettings=lambda: None))
     monkeypatch.setitem(sys.modules, "audio_stream", SimpleNamespace(endpoint=lambda *args: 1))
-    monkeypatch.setattr(audio_backend, "virtual_device_catalog", lambda: {
-        "inputs": [{"id": "steam-mic", "name": "Steam Streaming Microphone"}],
-        "outputs": [{"id": "steam-speakers", "name": "Steam Streaming Speakers"}]})
+    monkeypatch.setattr(audio_backend, "audio_device_catalog", lambda: {
+        "inputs": [{"id": "physical", "name": "USB Microphone"}, {"id": "steam-mic", "name": "Steam Streaming Microphone"}],
+        "outputs": [{"id": "edifier", "name": "EDIFIER"}, {"id": "steam-speakers", "name": "Steam Streaming Speakers"}]})
     monkeypatch.setattr(audio_backend, "active_endpoint_ids", lambda flow:
         ["aux", "steam-mic", "physical"] if flow else
         ["display", "steam-speakers", "edifier"])
@@ -104,3 +104,8 @@ def test_prepare_uses_hardware_id_without_initializing_legacy_audio(monkeypatch,
     with pytest.raises(RuntimeError, match="unavailable"):
         asyncio.run(backend.prepare(Http(), "http://localhost", "test"))
     assert len(calls) == 1
+
+    backend = audio_backend.WindowsAudioBackend(tmp_path, device_ids={"input_device": "physical", "output_device": "edifier"})
+    asyncio.run(backend.prepare(Http(), "http://localhost", "test"))
+    assert calls[-1] == {"command": 102, "params": [3, 3]}
+    assert backend.device_selection["input_device"]["id"] == "physical"

@@ -53,6 +53,45 @@ def virtual_device_catalog():
     return result
 
 
+def audio_device_catalog():
+    """All active Windows recording/playback endpoints, keyed by stable IDs.
+
+    QQ routing may target any device. The bridge's internal virtual transport
+    is separate and continues to use the prepared Steam ports.
+    """
+    import winreg
+
+    result = {"inputs": [], "outputs": [], "errors": []}
+    for group, flow, number in (("inputs", "Capture", 1), ("outputs", "Render", 0)):
+        try:
+            identities = {item.casefold() for item in active_endpoint_ids(number)}
+            path = r"SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio" + "\\" + flow
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path) as root:
+                for index in range(winreg.QueryInfoKey(root)[0]):
+                    key = winreg.EnumKey(root, index)
+                    identity = f"{{0.0.{number}.00000000}}.{key}"
+                    if identity.casefold() not in identities:
+                        continue
+                    try:
+                        with winreg.OpenKey(root, key + r"\Properties") as properties:
+                            try:
+                                label = winreg.QueryValueEx(properties, "{a45c254e-df1c-4efd-8020-67d146a850e0},14")[0]
+                            except OSError:
+                                label = winreg.QueryValueEx(properties, "{a45c254e-df1c-4efd-8020-67d146a850e0},2")[0]
+                                try:
+                                    adapter = winreg.QueryValueEx(properties, "{b3f8fa53-0004-438e-9003-51a46e139bfc},6")[0]
+                                    label = f"{label} ({adapter})"
+                                except OSError:
+                                    pass
+                        result[group].append({"id": identity, "name": str(label)})
+                    except OSError as error:
+                        result["errors"].append(str(error))
+            result[group].sort(key=lambda item: item["name"].casefold())
+        except (OSError, RuntimeError) as error:
+            result["errors"].append(str(error))
+    return result
+
+
 class Guid(ctypes.Structure):
     _fields_ = [("bytes", ctypes.c_ubyte * 16)]
 
