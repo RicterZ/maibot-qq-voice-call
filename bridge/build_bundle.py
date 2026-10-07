@@ -24,7 +24,7 @@ def bundle_files(platform: str, root: Path = ROOT) -> dict[str, bytes]:
         files[name] = (root / "bridge" / name).read_bytes()
     if platform == "windows":
         names = ("windows/start-av-host.ps1", "windows/components.json",
-                 "windows/virtual_audio.py", "windows/audio_stream.py", "windows/audio_backend.py")
+                 "windows/virtual_audio.py", "windows/audio_stream.py", "windows/audio_backend.py", "windows/wasapi.py")
     else:
         names = tuple(
             p.relative_to(root / "bridge").as_posix()

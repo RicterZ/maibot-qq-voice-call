@@ -1,73 +1,90 @@
-"""Pipe PCM to/from explicitly selected virtual ports; no default devices."""
+"""PCM pipes bound to explicit endpoint IDs; receive uses render loopback."""
 import argparse
 import sys
+import time
+
+import numpy as np
 
 
-def endpoint(sounddevice, pair, role):
-    apis = sounddevice.query_hostapis()
-    devices = sounddevice.query_devices()
-    matches = [i for i, device in enumerate(devices)
-               if apis[device["hostapi"]]["name"] == "Windows WASAPI"
-               and pair in device["name"] and device[f"max_{role}_channels"] >= 2
-               and device["default_samplerate"] == 48000]
-    if len(matches) != 1:
-        raise RuntimeError(f"No unique prepared {pair} {role} endpoint")
-    return matches[0]
+class Resampler:
+    """Continuous sample positions across chunks, with anti-aliasing on downsample."""
+    def __init__(self, source_rate, target_rate):
+        self.step = source_rate / target_rate
+        self.position = 0.0
+        self.total = 0
+        self.last = 0.0
+        self.taps = None
+        if target_rate < source_rate:
+            cutoff = .45 * target_rate / source_rate
+            x = np.arange(63) - 31
+            self.taps = 2 * cutoff * np.sinc(2 * cutoff * x) * np.hamming(63)
+            self.taps /= self.taps.sum()
+            self.history = np.zeros(62)
+
+    def feed(self, values):
+        if not len(values): return np.empty(0)
+        values = np.asarray(values, dtype=np.float64)
+        if self.taps is not None:
+            extended = np.concatenate((self.history, values))
+            values = np.convolve(extended, self.taps, mode="valid")
+            self.history = extended[-62:]
+        samples = np.concatenate(([self.last], values))
+        end = self.total + len(values) - 1
+        count = max(0, int(np.floor((end - self.position) / self.step + 1e-9)) + 1)
+        positions = self.position + np.arange(count) * self.step
+        result = np.interp(positions - (self.total - 1), np.arange(len(samples)), samples)
+        self.position += count * self.step
+        self.total += len(values)
+        self.last = float(values[-1])
+        return result
 
 
-def run(mode):
-    import numpy as np
-    import sounddevice as sd
+def run(mode, identity):
+    from wasapi import EndpointStream
 
-    pair = "Steam Streaming Speakers" if mode == "capture" else "Steam Streaming Microphone"
-    role = "input" if mode == "capture" else "output"
-    device = endpoint(sd, pair, role)
-    settings = dict(device=device, samplerate=48000, channels=2, dtype="float32",
-                    blocksize=960, latency="low", extra_settings=sd.WasapiSettings())
-    if mode == "capture":
-        # Low-pass before 48k->16k decimation. Keep FIR history across chunks.
-        taps = np.sinc((np.arange(63) - 31) / 3) * np.hamming(63)
-        taps /= taps.sum()
-        history = np.zeros(62)
-        with sd.InputStream(**settings) as stream:
+    with EndpointStream(identity, capture=mode == "capture") as device:
+        if mode == "capture":
+            convert = Resampler(device.rate, 16000)
+            pending = b""
+            idle_at = time.monotonic()
             while True:
-                data, overflow = stream.read(960)
-                if overflow:
-                    raise RuntimeError("Virtual audio capture overflow")
-                mono = data.mean(axis=1)
-                extended = np.concatenate((history, mono))
-                filtered = np.convolve(extended, taps, mode="valid")[::3]
-                history = extended[-62:]
-                pcm = (np.clip(filtered, -1, 1) * 32767).astype("<i2")
-                sys.stdout.buffer.write(pcm.tobytes())
-                sys.stdout.buffer.flush()
-    else:
-        pending = b""
-        last = 0.0
-        with sd.OutputStream(**settings) as stream:
+                values = device.read()
+                if values is None:
+                    # Keep protocol frames moving even when no render stream is active.
+                    if time.monotonic() - idle_at < .04:
+                        time.sleep(.003)
+                        continue
+                    pending += b"\0" * 640
+                    idle_at = time.monotonic()
+                else:
+                    idle_at = time.monotonic()
+                    mono = convert.feed(values)
+                    pending += (np.clip(mono, -1, 1) * 32767).astype("<i2").tobytes()
+                count = len(pending) // 640 * 640
+                if count:
+                    sys.stdout.buffer.write(pending[:count])
+                    sys.stdout.buffer.flush()
+                    pending = pending[count:]
+        else:
+            convert = Resampler(24000, device.rate)
+            pending = b""
             while True:
-                chunk = sys.stdin.buffer.read(960)
-                if not chunk:
-                    if pending:
-                        raise RuntimeError("Incomplete PCM sample")
-                    break
+                chunk = sys.stdin.buffer.read(640)
+                if not chunk: break
                 pending += chunk
                 count = len(pending) // 2 * 2
-                if not count:
-                    continue
-                mono = np.frombuffer(pending[:count], dtype="<i2").astype(np.float32) / 32768
+                if not count: continue
+                mono = np.frombuffer(pending[:count], dtype="<i2").astype(np.float64) / 32768
                 pending = pending[count:]
-                previous = np.concatenate(([last], mono[:-1]))
-                doubled = np.empty(len(mono) * 2, dtype=np.float32)
-                doubled[::2] = (previous + mono) / 2
-                doubled[1::2] = mono
-                last = float(mono[-1])
-                stereo = np.repeat(doubled[:, None], 2, axis=1)
-                if stream.write(stereo):
-                    raise RuntimeError("Virtual audio playback underflow")
+                device.write(convert.feed(mono))
+            if pending: raise RuntimeError("Incomplete PCM sample")
+            device.write(convert.feed(np.array([convert.last])))
+            device.drain()
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("capture", "playback"))
-    run(parser.parse_args().mode)
+    parser.add_argument("--endpoint-id", required=True)
+    args = parser.parse_args()
+    run(args.mode, args.endpoint_id)

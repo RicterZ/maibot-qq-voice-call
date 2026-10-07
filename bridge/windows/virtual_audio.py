@@ -53,43 +53,87 @@ def virtual_device_catalog():
     return result
 
 
-def audio_device_catalog():
-    """All active Windows recording/playback endpoints, keyed by stable IDs.
-
-    QQ routing may target any device. The bridge's internal virtual transport
-    is separate and continues to use the prepared Steam ports.
-    """
+def endpoint_records():
+    """Driver identity and endpoint association, independent of renamed labels."""
     import winreg
 
-    result = {"inputs": [], "outputs": [], "errors": []}
-    for group, flow, number in (("inputs", "Capture", 1), ("outputs", "Render", 0)):
-        try:
-            identities = {item.casefold() for item in active_endpoint_ids(number)}
-            path = r"SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio" + "\\" + flow
-            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path) as root:
-                for index in range(winreg.QueryInfoKey(root)[0]):
-                    key = winreg.EnumKey(root, index)
-                    identity = f"{{0.0.{number}.00000000}}.{key}"
-                    if identity.casefold() not in identities:
-                        continue
-                    try:
-                        with winreg.OpenKey(root, key + r"\Properties") as properties:
-                            try:
-                                label = winreg.QueryValueEx(properties, "{a45c254e-df1c-4efd-8020-67d146a850e0},14")[0]
-                            except OSError:
-                                label = winreg.QueryValueEx(properties, "{a45c254e-df1c-4efd-8020-67d146a850e0},2")[0]
-                                try:
-                                    adapter = winreg.QueryValueEx(properties, "{b3f8fa53-0004-438e-9003-51a46e139bfc},6")[0]
-                                    label = f"{label} ({adapter})"
-                                except OSError:
-                                    pass
-                        result[group].append({"id": identity, "name": str(label)})
-                    except OSError as error:
-                        result["errors"].append(str(error))
-            result[group].sort(key=lambda item: item["name"].casefold())
-        except (OSError, RuntimeError) as error:
-            result["errors"].append(str(error))
+    result = []
+    for flow, number in (("Capture", 1), ("Render", 0)):
+        path = r"SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio" + "\\" + flow
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path) as root:
+            for index in range(winreg.QueryInfoKey(root)[0]):
+                key = winreg.EnumKey(root, index)
+                try:
+                    with winreg.OpenKey(root, key) as endpoint:
+                        state = winreg.QueryValueEx(endpoint, "DeviceState")[0]
+                    if state & 0xF != 1: continue
+                    with winreg.OpenKey(root, key + r"\Properties") as properties:
+                        values = {winreg.EnumValue(properties, i)[0].casefold(): winreg.EnumValue(properties, i)[1]
+                                  for i in range(winreg.QueryInfoKey(properties)[1])}
+                    adapter = str(values.get("{b3f8fa53-0004-438e-9003-51a46e139bfc},6", ""))
+                    label = values.get("{a45c254e-df1c-4efd-8020-67d146a850e0},14")
+                    if not label:
+                        label = str(values.get("{a45c254e-df1c-4efd-8020-67d146a850e0},2", "Audio device"))
+                        if adapter: label += " (" + adapter + ")"
+                    associations = sorted(value.casefold() for value in values.values()
+                        if isinstance(value, str) and (value.startswith("{2}.") or value.startswith("{1}.")))
+                    driver = " ".join(str(v) for k, v in values.items()
+                                      if k != "{a45c254e-df1c-4efd-8020-67d146a850e0},14").casefold()
+                    virtual = any(name in driver for name in ("steamstreaming", "steam streaming", "vb-audio", "vbaudio", "virtual audio cable"))
+                    result.append({"id": f"{{0.0.{number}.00000000}}.{key}", "name": str(label),
+                        "flow": number, "state": state, "virtual": virtual, "association": associations})
+                except OSError:
+                    continue
     return result
+
+
+def audio_device_catalog():
+    """All active devices plus recoverable hidden virtual ports."""
+    records = endpoint_records()
+    result = {"inputs": [], "outputs": [], "errors": []}
+    for group, flow in (("inputs", 1), ("outputs", 0)):
+        active = {item.casefold() for item in active_endpoint_ids(flow)}
+        for item in records:
+            if item["flow"] != flow: continue
+            if item["id"].casefold() not in active and not (item["virtual"] and item["state"] & 0x10000000): continue
+            result[group].append({"id": item["id"], "name": item["name"], "virtual": item["virtual"]})
+        result[group].sort(key=lambda item: item["name"].casefold())
+    return result
+
+
+def select_transport(device_ids, records=None):
+    records = endpoint_records() if records is None else records
+    selected = {}
+    for role, flow, automatic in (("input_device", 1, "steamstreamingmicrophone"),
+                                  ("output_device", 0, "steamstreamingspeakers")):
+        requested = device_ids.get(role, "")
+        matches = [item for item in records if item["flow"] == flow and (
+            item["id"].casefold() == requested.casefold() if requested else
+            any(automatic in value.replace(" ", "") for value in item["association"]))]
+        if len(matches) != 1:
+            raise RuntimeError("所选音频设备不可用，请刷新设备列表并重新选择。" if requested else
+                "未找到默认虚拟音频线路，请在音频设置中选择已安装的虚拟麦克风和输出设备。")
+        selected[role] = matches[0]
+    source = selected["input_device"]
+    warnings = []
+    paired = [item for item in records if item["flow"] == 0 and
+              set(source["association"]) & set(item["association"])]
+    if source["virtual"]:
+        if len(paired) != 1:
+            raise RuntimeError("所选虚拟麦克风的对应播放端口缺失或不唯一，请检查虚拟音频驱动。")
+        injection = paired[0]
+    else:
+        # Respect an explicit physical-device choice; never switch it to Steam.
+        injection = paired[0] if len(paired) == 1 else selected["output_device"]
+        warnings.append("实体麦克风的语音回送取决于设备线路，可能外放或回声。")
+    shared = injection["id"].casefold() == selected["output_device"]["id"].casefold()
+    if shared and source["virtual"]:
+        warnings.append("共用一条虚拟线路，可能回声。")
+    if not selected["output_device"]["virtual"]:
+        warnings.append("实体输出设备可能外放。")
+    return {"input_device": source, "output_device": selected["output_device"],
+            "injection_device": injection, "warnings": warnings,
+            "half_duplex": shared or not source["virtual"]}
 
 
 class Guid(ctypes.Structure):
@@ -172,8 +216,9 @@ def device_format():
 
 
 class VirtualAudioSession:
-    def __init__(self, recovery_path: Path):
+    def __init__(self, recovery_path: Path, *, endpoint_ids=None):
         self.path = recovery_path
+        self.endpoint_ids = endpoint_ids
         self.policy = ctypes.c_void_p()
         self.originals = []
         self.ole = None
@@ -201,7 +246,8 @@ class VirtualAudioSession:
         errors = []
         for entry in reversed(self.originals):
             try:
-                self._set_format(entry["id"], bytes.fromhex(entry["format"]))
+                if "format" in entry:
+                    self._set_format(entry["id"], bytes.fromhex(entry["format"]))
                 if entry["hidden"]:
                     self._visibility(entry["id"], False)
             except Exception as error:
@@ -223,10 +269,24 @@ class VirtualAudioSession:
                 ctypes.byref(self.policy)))
             if self.path.exists():
                 self.originals = json.loads(self.path.read_text(encoding="utf-8"))
-                allowed = {endpoint for pair in PAIRS for endpoint, _ in discover_endpoints(pair)}
+                allowed = {entry["id"] for entry in endpoint_records() if entry["virtual"]}
                 if any(entry["id"] not in allowed for entry in self.originals):
                     raise RuntimeError("Recovery file contains an unknown virtual endpoint")
                 self._restore()
+            if self.endpoint_ids is not None:
+                records = {entry["id"].casefold(): entry for entry in endpoint_records()}
+                for identity in dict.fromkeys(self.endpoint_ids):
+                    entry = records.get(identity.casefold())
+                    if entry is None:
+                        raise RuntimeError("所选音频端口已离线，请刷新设备列表。")
+                    if entry["state"] & 0x10000000:
+                        if not entry["virtual"]: raise RuntimeError("不能自动启用隐藏的实体音频设备。")
+                        self.originals.append({"id": entry["id"], "hidden": True})
+                if self.originals:
+                    self._persist()
+                    for entry in self.originals: self._visibility(entry["id"], True)
+                self.ready = True
+                return self
             getter = com_method(self.policy, 4, ctypes.c_long, ctypes.c_wchar_p,
                                 ctypes.c_int, ctypes.POINTER(ctypes.c_void_p))
             # Snapshot all four ports before modifying any of them.

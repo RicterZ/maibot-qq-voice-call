@@ -1,68 +1,59 @@
-"""Windows adapter for the Momoi media protocol; no conversation state here."""
+"""QQ device selection and PCM transport share the same stable endpoint identities."""
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from pathlib import Path
 
-from virtual_audio import (VirtualAudioSession, audio_device_catalog, PAIRS,
-                           active_endpoint_ids, endpoint_selector)
-
+from virtual_audio import VirtualAudioSession, active_endpoint_ids, endpoint_selector, select_transport
 
 
 class WindowsAudioBackend:
     def __init__(self, runtime: Path, *, python=None, device_ids=None):
+        self.runtime = runtime
+        self.python = python or sys.executable
         self.device_ids = device_ids or {}
         self.device_selection = {}
-        self.session = VirtualAudioSession(runtime / "audio-recovery.json")
-        executable = python or sys.executable
-        script = str(Path(__file__).with_name("audio_stream.py"))
-        self.capture_command = (executable, "-B", "-X", "utf8", script, "capture")
-        self.playback_command = (executable, "-B", "-X", "utf8", script, "playback")
+        self.warnings = []
+        self.half_duplex = False
+        self.session = None
+        self.capture_command = self.playback_command = ()
         self.selected = False
 
     @property
     def ready(self):
-        return self.session.ready and self.selected
+        return bool(self.session and self.session.ready and self.selected)
+
+    def __enter__(self):
+        plan = select_transport(self.device_ids)
+        self.device_selection = {key: {"id": plan[key]["id"], "name": plan[key]["name"]}
+                                 for key in ("input_device", "output_device", "injection_device")}
+        self.warnings, self.half_duplex = plan["warnings"], plan["half_duplex"]
+        self.session = VirtualAudioSession(self.runtime / "audio-recovery.json",
+            endpoint_ids=[item["id"] for item in self.device_selection.values()])
+        self.session.__enter__()
+        script = str(Path(__file__).with_name("audio_stream.py"))
+        prefix = (self.python, "-B", "-X", "utf8", script)
+        self.capture_command = (*prefix, "capture", "--endpoint-id", plan["output_device"]["id"])
+        self.playback_command = (*prefix, "playback", "--endpoint-id", plan["injection_device"]["id"])
+        return self
 
     async def prepare(self, http, host_url, token):
-        catalog = audio_device_catalog()
-        for role, group in (("input_device", "inputs"), ("output_device", "outputs")):
-            requested = self.device_ids.get(role, "")
-            choices = catalog[group]
-            automatic = PAIRS[0] if role == "input_device" else PAIRS[1]
-            matches = [item for item in choices if
-                       (item["id"] == requested if requested else automatic in item["name"])]
-            if len(matches) != 1:
-                raise RuntimeError(f"Selected {role} is unavailable; no default-device fallback")
-            self.device_selection[role] = matches[0]
-        import sounddevice as sd
-        from audio_stream import endpoint
+        from wasapi import EndpointStream
 
-        # Explicit virtual ports only; fail before arming if WASAPI cannot open either.
-        settings = dict(samplerate=48000, channels=2, dtype="float32", blocksize=960,
-                        latency="low", extra_settings=sd.WasapiSettings())
-        with sd.InputStream(device=endpoint(sd, "Steam Streaming Speakers", "input"), **settings):
-            pass
-        with sd.OutputStream(
-                device=endpoint(sd, "Steam Streaming Microphone", "output"), **settings):
-            pass
-        headers = {"Authorization": "Bearer " + token}
-        async def invoke(command, params):
-            async with http.post(host_url + "/v1/invoke", headers=headers,
-                                 json={"command": command, "params": params}) as response:
-                response.raise_for_status()
-        # Commands 64/65 enumerate the legacy record/playout core. Command 102
-        # selects through QRTC hardware, which uses IMMDevice active collection
-        # indexes. Those lists can have different orders on the same machine.
-        selectors = [endpoint_selector(self.device_selection[role]["id"],
-                                       active_endpoint_ids(flow))
+        # Open exact selected endpoints without emitting test sounds or changing formats.
+        with EndpointStream(self.device_selection["output_device"]["id"], capture=True): pass
+        with EndpointStream(self.device_selection["injection_device"]["id"], capture=False): pass
+        selectors = [endpoint_selector(self.device_selection[role]["id"], active_endpoint_ids(flow))
                      for role, flow in (("input_device", 1), ("output_device", 0))]
-        print(__import__("json").dumps({"event": "qq_call_devices_selected",
-              "microphone_selector": selectors[0], "speaker_selector": selectors[1],
-              "devices": self.device_selection}),
-              file=sys.stderr, flush=True)
-        await invoke(102, selectors)
+        print(json.dumps({"event": "qq_call_devices_selected", "microphone_selector": selectors[0],
+            "speaker_selector": selectors[1], "devices": self.device_selection,
+            "warnings": self.warnings, "half_duplex": self.half_duplex}), file=sys.stderr, flush=True)
+        headers = {"Authorization": "Bearer " + token}
+        async with http.post(host_url + "/v1/invoke", headers=headers,
+            json={"command": 102, "params": selectors}) as response:
+            response.raise_for_status()
         for _ in range(50):
             async with http.get(host_url + "/v1/status", headers=headers) as response:
                 response.raise_for_status()
@@ -71,13 +62,10 @@ class WindowsAudioBackend:
             if selection.get("result") == 1:
                 self.selected = True
                 return
-            await asyncio.sleep(0.1)
-        raise RuntimeError("QQ virtual audio selection was not acknowledged")
-
-    def __enter__(self):
-        self.session.__enter__()
-        return self
+            await asyncio.sleep(.1)
+        raise RuntimeError("QQ 音频设备选择未确认，请重新应用设备。")
 
     def __exit__(self, *args):
         self.selected = False
-        return self.session.__exit__(*args)
+        if self.session:
+            return self.session.__exit__(*args)

@@ -64,48 +64,100 @@ def test_real_windows_legacy_list_order_must_not_select_physical_speaker():
     assert identities[3 - 1] == "edifier"
 
 
-def test_prepare_uses_hardware_id_without_initializing_legacy_audio(monkeypatch, tmp_path):
+def records():
+    def entry(identity, name, flow, association, virtual=True):
+        return {"id": identity, "name": name, "flow": flow, "association": [association],
+                "virtual": virtual, "state": 1}
+    return [entry("steam-mic", "Renamed virtual mic", 1, "steamstreamingmicrophone"),
+            entry("inject", "Renamed virtual render", 0, "steamstreamingmicrophone"),
+            entry("steam-speakers", "Renamed virtual output", 0, "steamstreamingspeakers"),
+            entry("physical", "USB Microphone", 1, "usb-device", False),
+            entry("edifier", "EDIFIER", 0, "usb-device", False)]
+
+
+def test_selected_transport_uses_id_and_driver_association_not_names():
+    plan = virtual_audio.select_transport({}, records())
+    assert plan["injection_device"]["id"] == "inject"
+    assert plan["output_device"]["id"] == "steam-speakers"
+    assert not plan["warnings"]
+    plan = virtual_audio.select_transport({"input_device": "steam-mic", "output_device": "edifier"}, records())
+    assert plan["injection_device"]["id"] == "inject"
+    assert plan["output_device"]["id"] == "edifier"
+    assert plan["warnings"]
+
+
+def test_physical_devices_warn_but_are_never_rejected_or_replaced():
+    plan = virtual_audio.select_transport({"input_device": "physical", "output_device": "edifier"}, records())
+    assert plan["input_device"]["id"] == "physical"
+    assert plan["injection_device"]["id"] == "edifier"
+    assert plan["warnings"]
+    assert plan["half_duplex"]
+
+
+def test_shared_virtual_line_warns_instead_of_refusing():
+    plan = virtual_audio.select_transport({"output_device": "inject"}, records())
+    assert plan["output_device"]["id"] == "inject"
+    assert plan["warnings"] and plan["half_duplex"]
+
+
+def test_disconnected_device_and_ambiguous_pair_do_not_fall_back():
+    with pytest.raises(RuntimeError):
+        virtual_audio.select_transport({"input_device": "missing"}, records())
+    duplicate = {**records()[1], "id": "duplicate"}
+    with pytest.raises(RuntimeError):
+        virtual_audio.select_transport({}, [*records(), duplicate])
+
+
+def test_prepare_uses_selected_ids_for_both_pcm_and_qq(monkeypatch, tmp_path):
     import asyncio
     from types import SimpleNamespace
 
+    operations = []
     class Stream:
-        def __init__(self, **kwargs): pass
+        def __init__(self, identity, *, capture): operations.append((identity, capture))
         def __enter__(self): return self
         def __exit__(self, *args): pass
-
-    monkeypatch.setitem(sys.modules, "sounddevice", SimpleNamespace(
-        InputStream=Stream, OutputStream=Stream, WasapiSettings=lambda: None))
-    monkeypatch.setitem(sys.modules, "audio_stream", SimpleNamespace(endpoint=lambda *args: 1))
-    monkeypatch.setattr(audio_backend, "audio_device_catalog", lambda: {
-        "inputs": [{"id": "physical", "name": "USB Microphone"}, {"id": "steam-mic", "name": "Steam Streaming Microphone"}],
-        "outputs": [{"id": "edifier", "name": "EDIFIER"}, {"id": "steam-speakers", "name": "Steam Streaming Speakers"}]})
+    class Session:
+        ready = True
+        def __init__(self, path, *, endpoint_ids): operations.append(tuple(endpoint_ids))
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+    monkeypatch.setitem(sys.modules, "wasapi", SimpleNamespace(EndpointStream=Stream))
+    monkeypatch.setattr(audio_backend, "VirtualAudioSession", Session)
+    monkeypatch.setattr(audio_backend, "select_transport", lambda value: virtual_audio.select_transport(value, records()))
     monkeypatch.setattr(audio_backend, "active_endpoint_ids", lambda flow:
-        ["aux", "steam-mic", "physical"] if flow else
-        ["display", "steam-speakers", "edifier"])
+        ["aux", "steam-mic", "physical"] if flow else ["display", "steam-speakers", "edifier"])
     calls = []
-
     class Response:
         async def __aenter__(self): return self
         async def __aexit__(self, *args): pass
         def raise_for_status(self): pass
         async def json(self): return {"data": {"audioDevices": {"selection": {"result": 1}}}}
-
     class Http:
         def post(self, url, **kwargs):
             calls.append(kwargs["json"])
             return Response()
         def get(self, *args, **kwargs): return Response()
-
-    backend = audio_backend.WindowsAudioBackend(tmp_path)
-    asyncio.run(backend.prepare(Http(), "http://localhost", "test"))
-    assert calls == [{"command": 102, "params": [2, 2]}]
-    assert backend.selected
-    backend = audio_backend.WindowsAudioBackend(tmp_path, device_ids={"input_device": "missing"})
-    with pytest.raises(RuntimeError, match="unavailable"):
+    backend = audio_backend.WindowsAudioBackend(tmp_path, device_ids={"output_device": "edifier"})
+    with backend:
         asyncio.run(backend.prepare(Http(), "http://localhost", "test"))
-    assert len(calls) == 1
+        assert calls == [{"command": 102, "params": [2, 3]}]
+        assert backend.capture_command[-1] == "edifier"
+        assert backend.playback_command[-1] == "inject"
+        assert ("edifier", True) in operations
+        assert ("inject", False) in operations
+        assert backend.ready and backend.warnings
 
-    backend = audio_backend.WindowsAudioBackend(tmp_path, device_ids={"input_device": "physical", "output_device": "edifier"})
-    asyncio.run(backend.prepare(Http(), "http://localhost", "test"))
-    assert calls[-1] == {"command": 102, "params": [3, 3]}
-    assert backend.device_selection["input_device"]["id"] == "physical"
+
+def test_resampling_chunk_boundaries_are_continuous():
+    import numpy as np
+    spec = importlib.util.spec_from_file_location("audio_stream", WINDOWS / "audio_stream.py")
+    stream = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(stream)
+    for source, target in ((24000, 48000), (48000, 16000), (44100, 16000), (24000, 44100)):
+        signal = np.sin(np.arange(source // 10) * 2 * np.pi * 440 / source)
+        whole = stream.Resampler(source, target).feed(signal)
+        converter = stream.Resampler(source, target)
+        chunks = np.concatenate([converter.feed(part) for part in np.array_split(signal, 19)])
+        assert np.allclose(whole, chunks)
+        assert abs(len(whole) - target // 10) <= 2
