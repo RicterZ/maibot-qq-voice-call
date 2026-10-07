@@ -119,6 +119,7 @@ function startControlServer() {
         data: {
           electron: process.versions.electron ?? null,
           chrome: process.versions.chrome ?? null,
+          audioProcesses: app.getAppMetrics().map(({ pid, type }) => ({ pid, type })),
           ...rendererState,
         },
       });

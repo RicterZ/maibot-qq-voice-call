@@ -41,6 +41,18 @@ def discover_endpoints(pair: str):
     return result
 
 
+def virtual_device_catalog():
+    """Stable endpoint IDs for the supported, physically isolated Steam pair."""
+    result = {"inputs": [], "outputs": []}
+    for role, pair, flow in (("inputs", PAIRS[0], 1), ("outputs", PAIRS[1], 0)):
+        try:
+            identity, _ = discover_endpoints(pair)[flow]
+            result[role].append({"id": identity, "name": pair})
+        except (OSError, RuntimeError) as error:
+            result.setdefault("errors", []).append(str(error))
+    return result
+
+
 class Guid(ctypes.Structure):
     _fields_ = [("bytes", ctypes.c_ubyte * 16)]
 
@@ -56,6 +68,63 @@ def com_method(obj, index, result_type, *args):
 def checked(result):
     if result < 0:
         raise OSError(f"Audio policy HRESULT 0x{result & 0xFFFFFFFF:08x}")
+
+
+def active_endpoint_ids(flow: int):
+    """Enumerate the exact MMDevice active collection used by AVSDK hardware selection.
+
+    Registry order and the legacy QQ name list are not MMDevice collection indexes.
+    This query opens no audio streams and changes no device settings.
+    """
+    if flow not in (0, 1):
+        raise ValueError("Expected render (0) or capture (1)")
+    ole = ctypes.OleDLL("ole32")
+    checked(ole.CoInitializeEx(None, 0))
+    enumerator = ctypes.c_void_p()
+    collection = ctypes.c_void_p()
+    try:
+        checked(ole.CoCreateInstance(
+            ctypes.byref(Guid("bcde0395-e52f-467c-8e3d-c4579291692e")), None, 23,
+            ctypes.byref(Guid("a95664d2-9614-4f35-a746-de8db63617e6")),
+            ctypes.byref(enumerator)))
+        checked(com_method(enumerator, 3, ctypes.c_long, ctypes.c_int, ctypes.c_ulong,
+                           ctypes.POINTER(ctypes.c_void_p))(
+                               enumerator, flow, 1, ctypes.byref(collection)))
+        count = ctypes.c_uint()
+        checked(com_method(collection, 3, ctypes.c_long, ctypes.POINTER(ctypes.c_uint))(
+            collection, ctypes.byref(count)))
+        identities = []
+        for index in range(count.value):
+            device = ctypes.c_void_p()
+            text = ctypes.c_void_p()
+            try:
+                checked(com_method(collection, 4, ctypes.c_long, ctypes.c_uint,
+                                   ctypes.POINTER(ctypes.c_void_p))(
+                                       collection, index, ctypes.byref(device)))
+                checked(com_method(device, 5, ctypes.c_long,
+                                   ctypes.POINTER(ctypes.c_void_p))(
+                                       device, ctypes.byref(text)))
+                identities.append(ctypes.wstring_at(text))
+            finally:
+                if text:
+                    ole.CoTaskMemFree(text)
+                if device:
+                    com_method(device, 2, ctypes.c_ulong)(device)
+        return identities
+    finally:
+        if collection:
+            com_method(collection, 2, ctypes.c_ulong)(collection)
+        if enumerator:
+            com_method(enumerator, 2, ctypes.c_ulong)(enumerator)
+        ole.CoUninitialize()
+
+
+def endpoint_selector(identity: str, identities):
+    matches = [index for index, candidate in enumerate(identities)
+               if candidate.casefold() == identity.casefold()]
+    if len(matches) != 1:
+        raise RuntimeError("Selected virtual endpoint is absent or ambiguous in MMDevice collection")
+    return matches[0] + 1
 
 
 def device_format():

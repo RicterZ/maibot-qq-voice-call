@@ -22,24 +22,13 @@ def test_virtual_format_is_stereo_48k_32bit():
     assert struct.unpack_from("<HHIIHHHHI", value) == (65534, 2, 48000, 384000, 8, 32, 22, 32, 3)
 
 
-def test_native_selection_follows_names_not_default_or_portaudio_indices():
-    devices = {
-        "microphone": {"result": 0, "names": ["physical", "another", "Steam Streaming Microphone"]},
-        "speaker": {"result": 0, "names": ["Steam Streaming Speakers", "physical"]},
-    }
-    assert audio_backend.virtual_selectors(devices) == [3, 1]
-    devices["speaker"]["names"] = ["physical"]
-    with pytest.raises(RuntimeError, match="Expected one native"):
-        audio_backend.virtual_selectors(devices)
-    devices["speaker"]["result"] = -1
-    with pytest.raises(RuntimeError, match="not ready"):
-        audio_backend.virtual_selectors(devices)
-
-
-def test_ambiguous_virtual_devices_are_rejected():
-    with pytest.raises(RuntimeError, match="Expected one native"):
-        audio_backend.virtual_selectors({"microphone": {"result": 0, "names": [
-            "Steam Streaming Microphone", "Steam Streaming Microphone"]}})
+def test_hardware_selector_uses_endpoint_identity_and_one_based_mmdevice_index():
+    assert virtual_audio.endpoint_selector("STEAM-MIC", ["aux", "steam-mic", "physical"]) == 2
+    assert virtual_audio.endpoint_selector("steam-speakers", ["display", "steam-speakers", "physical"]) == 2
+    with pytest.raises(RuntimeError, match="absent or ambiguous"):
+        virtual_audio.endpoint_selector("missing", ["physical"])
+    with pytest.raises(RuntimeError, match="absent or ambiguous"):
+        virtual_audio.endpoint_selector("same", ["same", "SAME"])
 
 
 def test_failed_restoration_retains_recovery_document(tmp_path):
@@ -66,9 +55,52 @@ def test_successful_restoration_returns_formats_and_visibility(tmp_path):
     assert session.originals == []
 
 
-def test_real_windows_enumeration_does_not_select_previous_physical_endpoint():
-    devices = {
-        "microphone": {"result": 0, "names": ["AUX (Steam Streaming Speakers)", "Mic (Steam Streaming Microphone)", "Physical mic"]},
-        "speaker": {"result": 0, "names": ["Physical speaker", "Physical display", "Speaker (Steam Streaming Speakers)"]},
-    }
-    assert audio_backend.virtual_selectors(devices) == [2, 3]
+def test_real_windows_legacy_list_order_must_not_select_physical_speaker():
+    # Observed on Windows: legacy 65 names = EDIFIER, display, Steam, display, SteamMic.
+    # Command 102 uses MMDevice collection = display, Steam, EDIFIER, display, SteamMic.
+    # Using legacy index + 1 (=3) opens EDIFIER; identity maps correctly to selector 2.
+    identities = ["display-1", "steam-speakers", "edifier", "display-2", "steam-mic"]
+    assert virtual_audio.endpoint_selector("steam-speakers", identities) == 2
+    assert identities[3 - 1] == "edifier"
+
+
+def test_prepare_uses_hardware_id_without_initializing_legacy_audio(monkeypatch, tmp_path):
+    import asyncio
+    from types import SimpleNamespace
+
+    class Stream:
+        def __init__(self, **kwargs): pass
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+
+    monkeypatch.setitem(sys.modules, "sounddevice", SimpleNamespace(
+        InputStream=Stream, OutputStream=Stream, WasapiSettings=lambda: None))
+    monkeypatch.setitem(sys.modules, "audio_stream", SimpleNamespace(endpoint=lambda *args: 1))
+    monkeypatch.setattr(audio_backend, "virtual_device_catalog", lambda: {
+        "inputs": [{"id": "steam-mic", "name": "Steam Streaming Microphone"}],
+        "outputs": [{"id": "steam-speakers", "name": "Steam Streaming Speakers"}]})
+    monkeypatch.setattr(audio_backend, "active_endpoint_ids", lambda flow:
+        ["aux", "steam-mic", "physical"] if flow else
+        ["display", "steam-speakers", "edifier"])
+    calls = []
+
+    class Response:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        def raise_for_status(self): pass
+        async def json(self): return {"data": {"audioDevices": {"selection": {"result": 1}}}}
+
+    class Http:
+        def post(self, url, **kwargs):
+            calls.append(kwargs["json"])
+            return Response()
+        def get(self, *args, **kwargs): return Response()
+
+    backend = audio_backend.WindowsAudioBackend(tmp_path)
+    asyncio.run(backend.prepare(Http(), "http://localhost", "test"))
+    assert calls == [{"command": 102, "params": [2, 2]}]
+    assert backend.selected
+    backend = audio_backend.WindowsAudioBackend(tmp_path, device_ids={"input_device": "missing"})
+    with pytest.raises(RuntimeError, match="unavailable"):
+        asyncio.run(backend.prepare(Http(), "http://localhost", "test"))
+    assert len(calls) == 1

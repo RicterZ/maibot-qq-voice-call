@@ -5,26 +5,15 @@ import asyncio
 import sys
 from pathlib import Path
 
-from virtual_audio import VirtualAudioSession
+from virtual_audio import (VirtualAudioSession, virtual_device_catalog,
+                           active_endpoint_ids, endpoint_selector)
 
-
-def virtual_selectors(devices):
-    result = []
-    for role, pair in (("microphone", "Steam Streaming Microphone"),
-                       ("speaker", "Steam Streaming Speakers")):
-        entry = devices.get(role) or {}
-        if entry.get("result") != 0:
-            raise RuntimeError("Native audio enumeration is not ready")
-        matches = [index for index, name in enumerate(entry.get("names") or []) if pair in name]
-        if len(matches) != 1:
-            raise RuntimeError(f"Expected one native {pair} endpoint")
-        # AVSDK SetAudioDevices subtracts one; selector 0 means system default.
-        result.append(matches[0] + 1)
-    return result
 
 
 class WindowsAudioBackend:
-    def __init__(self, runtime: Path, *, python=None):
+    def __init__(self, runtime: Path, *, python=None, device_ids=None):
+        self.device_ids = device_ids or {}
+        self.device_selection = {}
         self.session = VirtualAudioSession(runtime / "audio-recovery.json")
         executable = python or sys.executable
         script = str(Path(__file__).with_name("audio_stream.py"))
@@ -37,6 +26,14 @@ class WindowsAudioBackend:
         return self.session.ready and self.selected
 
     async def prepare(self, http, host_url, token):
+        catalog = virtual_device_catalog()
+        for role, group in (("input_device", "inputs"), ("output_device", "outputs")):
+            requested = self.device_ids.get(role, "")
+            choices = catalog[group]
+            matches = [item for item in choices if not requested or item["id"] == requested]
+            if len(matches) != 1:
+                raise RuntimeError(f"Selected virtual {role} is unavailable; no default-device fallback")
+            self.device_selection[role] = matches[0]
         import sounddevice as sd
         from audio_stream import endpoint
 
@@ -53,22 +50,15 @@ class WindowsAudioBackend:
             async with http.post(host_url + "/v1/invoke", headers=headers,
                                  json={"command": command, "params": params}) as response:
                 response.raise_for_status()
-        for command in (64, 65):
-            await invoke(command, [])
-        selectors = None
-        for _ in range(50):
-            async with http.get(host_url + "/v1/status", headers=headers) as response:
-                response.raise_for_status()
-                data = (await response.json())["data"]
-            try:
-                selectors = virtual_selectors(data.get("audioDevices") or {})
-                break
-            except RuntimeError:
-                await asyncio.sleep(0.1)
-        if selectors is None:
-            raise RuntimeError("QQ cannot enumerate the prepared virtual audio pair")
+        # Commands 64/65 enumerate the legacy record/playout core. Command 102
+        # selects through QRTC hardware, which uses IMMDevice active collection
+        # indexes. Those lists can have different orders on the same machine.
+        selectors = [endpoint_selector(self.device_selection[role]["id"],
+                                       active_endpoint_ids(flow))
+                     for role, flow in (("input_device", 1), ("output_device", 0))]
         print(__import__("json").dumps({"event": "qq_call_virtual_devices_selected",
-              "microphone_selector": selectors[0], "speaker_selector": selectors[1]}),
+              "microphone_selector": selectors[0], "speaker_selector": selectors[1],
+              "devices": self.device_selection}),
               file=sys.stderr, flush=True)
         await invoke(102, selectors)
         for _ in range(50):
