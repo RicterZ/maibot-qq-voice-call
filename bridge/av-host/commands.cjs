@@ -7,7 +7,7 @@ function validInvocation(command, params) {
   if (command === 64 || command === 65) return params.length === 0;
   if (command === 102) {
     return params.length === 2 && params.every((value) =>
-      Number.isInteger(value) && value >= 0 && value < 0xffffffff);
+      Number.isInteger(value) && value > 0 && value < 0xffffffff);
   }
   return true;
 }

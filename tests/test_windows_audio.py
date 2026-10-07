@@ -27,7 +27,7 @@ def test_native_selection_follows_names_not_default_or_portaudio_indices():
         "microphone": {"result": 0, "names": ["physical", "another", "Steam Streaming Microphone"]},
         "speaker": {"result": 0, "names": ["Steam Streaming Speakers", "physical"]},
     }
-    assert audio_backend.virtual_selectors(devices) == [2, 0]
+    assert audio_backend.virtual_selectors(devices) == [3, 1]
     devices["speaker"]["names"] = ["physical"]
     with pytest.raises(RuntimeError, match="Expected one native"):
         audio_backend.virtual_selectors(devices)
@@ -64,3 +64,11 @@ def test_successful_restoration_returns_formats_and_visibility(tmp_path):
     assert operations == [("format", "virtual", b"\x00\x01"), ("visibility", "virtual", False)]
     assert not session.path.exists()
     assert session.originals == []
+
+
+def test_real_windows_enumeration_does_not_select_previous_physical_endpoint():
+    devices = {
+        "microphone": {"result": 0, "names": ["AUX (Steam Streaming Speakers)", "Mic (Steam Streaming Microphone)", "Physical mic"]},
+        "speaker": {"result": 0, "names": ["Physical speaker", "Physical display", "Speaker (Steam Streaming Speakers)"]},
+    }
+    assert audio_backend.virtual_selectors(devices) == [2, 3]

@@ -189,7 +189,7 @@ async function forwardPluginMessage(message) {
     rendererState.audioDevices[key] = message.cmd === 102
       ? { result: message.value[0] }
       : { result: message.value[0], names: Array.isArray(message.value[2])
-          ? message.value[2].filter((name) => typeof name === "string").slice(0, 128) : [] };
+          ? message.value[2].map((name) => typeof name === "string" ? name : "").slice(0, 128) : [] };
   }
   try {
     const response = await fetch(

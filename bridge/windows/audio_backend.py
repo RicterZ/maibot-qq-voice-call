@@ -18,7 +18,8 @@ def virtual_selectors(devices):
         matches = [index for index, name in enumerate(entry.get("names") or []) if pair in name]
         if len(matches) != 1:
             raise RuntimeError(f"Expected one native {pair} endpoint")
-        result.append(matches[0])
+        # AVSDK SetAudioDevices subtracts one; selector 0 means system default.
+        result.append(matches[0] + 1)
     return result
 
 
@@ -66,6 +67,9 @@ class WindowsAudioBackend:
                 await asyncio.sleep(0.1)
         if selectors is None:
             raise RuntimeError("QQ cannot enumerate the prepared virtual audio pair")
+        print(__import__("json").dumps({"event": "qq_call_virtual_devices_selected",
+              "microphone_selector": selectors[0], "speaker_selector": selectors[1]}),
+              file=sys.stderr, flush=True)
         await invoke(102, selectors)
         for _ in range(50):
             async with http.get(host_url + "/v1/status", headers=headers) as response:
