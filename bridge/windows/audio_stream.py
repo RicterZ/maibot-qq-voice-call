@@ -1,4 +1,5 @@
 """PCM pipes bound to explicit endpoint IDs; receive uses render loopback."""
+import logging
 import argparse
 import sys
 import time
@@ -46,6 +47,9 @@ def run(mode, identity):
     from wasapi import EndpointStream
 
     with EndpointStream(identity, capture=mode == "capture") as device:
+        logger = logging.getLogger(__name__)
+        logger.debug("event=qq_call_wasapi_opened mode=%s endpoint_id=%s sample_rate=%s channels=%s bits=%s format_tag=%s",
+                     mode, identity, device.rate, device.channels, device.bits, device.tag)
         if mode == "capture":
             convert = Resampler(device.rate, 16000)
             pending = b""
@@ -71,6 +75,8 @@ def run(mode, identity):
         else:
             convert = Resampler(24000, device.rate)
             pending = b""
+            received = 0
+            peak = 0.0
             while True:
                 chunk = sys.stdin.buffer.read(640)
                 if not chunk: break
@@ -79,13 +85,19 @@ def run(mode, identity):
                 if not count: continue
                 mono = np.frombuffer(pending[:count], dtype="<i2").astype(np.float64) / 32768
                 pending = pending[count:]
+                received += count
+                peak = max(peak, float(np.max(np.abs(mono))))
+                if received == count:
+                    logger.debug("event=qq_call_wasapi_first_write endpoint_id=%s pcm_bytes=%s peak=%s", identity, count, peak)
                 device.write(convert.feed(mono))
             if pending: raise RuntimeError("Incomplete PCM sample")
             device.write(convert.feed(np.array([convert.last])))
             device.drain()
+            logger.debug("event=qq_call_wasapi_drained endpoint_id=%s pcm_bytes=%s peak=%s", identity, received, peak)
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.DEBUG, format="%(asctime)s %(levelname)s %(message)s")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("capture", "playback"))
     parser.add_argument("--endpoint-id", required=True)
