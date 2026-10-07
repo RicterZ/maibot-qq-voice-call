@@ -45,7 +45,8 @@ def test_native_runtime_excludes_miniapps_but_preserves_avsdk(tmp_path):
     version = json.loads(native.COMPONENTS.read_text())["qq"]["version"]
     source = tmp_path / "Files"
     app = source / "versions" / version / "resources/app"
-    for name in ("wmpfsdk/runtime/flue.dll", "avsdk/AVSDKPlugin.dll", "package.json"):
+    for name in ("wmpfsdk/runtime/flue.dll", "miniapp/module.js", "QQScreenShot/screenshot.dll",
+                 "major.node", "wrapper.node", "application.asar", "avsdk/AVSDKPlugin.dll", "package.json"):
         path = app / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"native")
@@ -53,6 +54,7 @@ def test_native_runtime_excludes_miniapps_but_preserves_avsdk(tmp_path):
     destination = tmp_path / "output"
     native.copy_qq_runtime(source, destination)
     relative = app.relative_to(source)
-    assert not (destination / relative / "wmpfsdk").exists()
+    for name in ("wmpfsdk", "miniapp", "QQScreenShot", "major.node", "wrapper.node", "application.asar"):
+        assert not (destination / relative / name).exists()
     assert (destination / relative / "avsdk/AVSDKPlugin.dll").read_bytes() == b"native"
     assert (destination / "QQ.exe").read_bytes() == b"host"

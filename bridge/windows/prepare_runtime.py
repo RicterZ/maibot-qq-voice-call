@@ -32,12 +32,13 @@ def download(component, destination):
 
 
 def copy_qq_runtime(source: Path, destination: Path):
-    """Exclude mini-apps only at the pinned QQ app boundary, before copying."""
+    """Keep the Electron/AVSDK host, excluding QQ business modules at its app boundary."""
     version = json.loads(COMPONENTS.read_text(encoding="utf-8"))["qq"]["version"]
     app = source / "versions" / version / "resources/app"
 
     def excluded(directory, names):
-        return {"wmpfsdk"} if Path(directory) == app and "wmpfsdk" in names else set()
+        excluded_names = {"wmpfsdk", "miniapp", "QQScreenShot", "major.node", "wrapper.node", "application.asar"}
+        return excluded_names.intersection(names) if Path(directory) == app else set()
 
     shutil.copytree(source, destination, ignore=excluded)
 
@@ -53,7 +54,8 @@ def prepare(output: Path, cache: Path, sevenzip="7z"):
         check=True,
         stdout=subprocess.DEVNULL,
     )
-    # Preserve the native host closure, but exclude the unrelated mini-app runtime.
+    # Preserve the native Electron/AVSDK host closure. The custom bootstrap does
+    # not load QQ business modules; NapCat ships its own separate wrapper.node.
     # The Electron QQNT.dll cannot be replaced by the NapCat Node QQNT.dll.
     qq = output / "qq/Files"
     if qq.exists():
