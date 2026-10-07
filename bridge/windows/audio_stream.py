@@ -2,6 +2,9 @@
 import argparse
 import sys
 import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import numpy as np
 
@@ -51,7 +54,7 @@ def run(mode, identity):
                 values = device.read()
                 if values is None:
                     # Keep protocol frames moving even when no render stream is active.
-                    if time.monotonic() - idle_at < .04:
+                    if time.monotonic() - idle_at < .02:
                         time.sleep(.003)
                         continue
                     pending += b"\0" * 640
