@@ -135,6 +135,7 @@ function startControlServer() {
         if ([64, 65, 102].includes(command)) {
           rendererState.audioDevices[{ 64: "microphone", 65: "speaker", 102: "selection" }[command]] = null;
         }
+        if (command === 102) selectedHardware = [...params];
         const invocationId = nextInvocationId++;
         const result = await avWindow?.webContents.executeJavaScript(
           `window.maibotQQCallAVSDKInvoke(${JSON.stringify(command)},` +
@@ -176,6 +177,23 @@ ipcMain.on("maibot-qq-call-avsdk-message", () => {
   rendererState = { ...rendererState, messageCount: rendererState.messageCount + 1 };
 });
 
+let selectedHardware = null;
+let audioEngineGeneration = 0;
+
+async function rebindAudioEngine() {
+  if (!selectedHardware) return;
+  const invocationId = nextInvocationId++;
+  try {
+    await avWindow?.webContents.executeJavaScript(
+      `window.maibotQQCallAVSDKInvoke(102,${JSON.stringify(invocationId)},${JSON.stringify(selectedHardware)})`, true);
+    console.log(JSON.stringify({ event: "qq_call_audio_engine_rebind", generation: audioEngineGeneration,
+      microphone_selector: selectedHardware[0], speaker_selector: selectedHardware[1] }));
+  } catch (error) {
+    console.error(JSON.stringify({ event: "qq_call_audio_engine_rebind_failed", generation: audioEngineGeneration,
+      error: error?.message ?? String(error) }));
+  }
+}
+
 async function forwardPluginMessage(message) {
   if (
     !message ||
@@ -184,6 +202,10 @@ async function forwardPluginMessage(message) {
     !Object.hasOwn(message, "value")
   ) {
     return;
+  }
+  if (message.cmd === 20038) {
+    audioEngineGeneration += 1;
+    await rebindAudioEngine();
   }
   if ([64, 65, 102].includes(message.cmd) && Array.isArray(message.value)) {
     const key = { 64: "microphone", 65: "speaker", 102: "selection" }[message.cmd];

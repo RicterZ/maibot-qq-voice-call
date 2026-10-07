@@ -390,7 +390,8 @@ function recordEvent(name, args) {
       inviteAt: now,
       inviteType: typeof args[0]?.invite_type === "number" ? args[0].invite_type : null,
     };
-  } else if (lowerName === "ons2cactiontoavsdk" && typeof args[0]?.destroyReason === "number") {
+  } else if (lowerName === "ons2cactiontoavsdk" && typeof args[0]?.destroyReason === "number"
+      && args[0].destroyReason !== 0) {
     if (acceptTimer) clearTimeout(acceptTimer);
     acceptTimer = null;
     activeSDKInvite = null;
