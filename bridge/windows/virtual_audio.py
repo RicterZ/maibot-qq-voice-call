@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import ctypes
 import json
+import re
 import struct
 import sys
 import uuid
@@ -101,6 +102,15 @@ def audio_device_catalog():
     return result
 
 
+def cable_family(entry):
+    # VB-CABLE uses different pin/device associations for recording and playback.
+    # Preserve the A/B/C/D or numbered cable identity; do not join every VB endpoint.
+    if not entry.get("virtual"): return None
+    match = re.search(r"\b(cable(?:[- ][a-z]|[- ]\d+)?)\s+(?:input|output)\b",
+                      entry["name"], re.IGNORECASE)
+    return match.group(1).casefold().replace(" ", "-") if match else None
+
+
 def select_transport(device_ids, records=None):
     records = endpoint_records() if records is None else records
     selected = {}
@@ -119,6 +129,9 @@ def select_transport(device_ids, records=None):
     paired = [item for item in records if item["flow"] == 0 and
               set(source["association"]) & set(item["association"])]
     if source["virtual"]:
+        family = cable_family(source)
+        if family:
+            paired = [item for item in records if item["flow"] == 0 and cable_family(item) == family]
         if len(paired) != 1:
             raise RuntimeError("所选虚拟麦克风的对应播放端口缺失或不唯一，请检查虚拟音频驱动。")
         injection = paired[0]

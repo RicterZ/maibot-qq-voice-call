@@ -161,3 +161,18 @@ def test_resampling_chunk_boundaries_are_continuous():
         chunks = np.concatenate([converter.feed(part) for part in np.array_split(signal, 19)])
         assert np.allclose(whole, chunks)
         assert abs(len(whole) - target // 10) <= 2
+
+
+def test_cable_input_output_pair_uses_cable_identity_not_pin_association():
+    def port(identity, name, flow, association):
+        return {"id": identity, "name": name, "flow": flow, "association": [association], "virtual": True, "state": 1}
+    devices = [port("cable-out", "CABLE Output (VB-Audio Virtual Cable)", 1, "record-pin"),
+               port("cable-in", "CABLE Input (VB-Audio Virtual Cable)", 0, "render-pin"),
+               port("a-out", "CABLE-A Output (VB-Audio Cable A)", 1, "another-record"),
+               port("a-in", "CABLE-A Input (VB-Audio Cable A)", 0, "another-render")]
+    plan = virtual_audio.select_transport({"input_device": "cable-out", "output_device": "cable-in"}, devices)
+    assert plan["injection_device"]["id"] == "cable-in"
+    assert plan["half_duplex"]
+    plan = virtual_audio.select_transport({"input_device": "a-out", "output_device": "cable-in"}, devices)
+    assert plan["injection_device"]["id"] == "a-in"
+    assert not plan["half_duplex"]
